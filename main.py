@@ -1,5 +1,7 @@
 import logging
 import json
+import firebase_admin
+from firebase_admin import credentials, firestore
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -9,7 +11,7 @@ from telegram.ext import (
     filters,
     CallbackContext
 )
-import functions_framework
+from firebase_functions import https
 
 # Configuração do logging
 logging.basicConfig(
@@ -17,51 +19,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Arquivo para persistência
-COURSES_FILE = "cursos.json"
+# Iniciar o Firebase Admin SDK
+cred = credentials.ApplicationDefault()
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
+# Configuração do bot
+COURSES_COLLECTION = "courses"
+
+# Funções Firebase para persistir dados no Firestore
 def load_courses():
-    try:
-        with open(COURSES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    courses_ref = db.collection(COURSES_COLLECTION)
+    docs = courses_ref.stream()
+    courses = {}
+    for doc in docs:
+        courses[doc.id] = doc.to_dict()
+    return courses
 
 def save_courses(courses):
-    with open(COURSES_FILE, "w", encoding="utf-8") as f:
-        json.dump(courses, f, indent=4)
+    courses_ref = db.collection(COURSES_COLLECTION)
+    for name, info in courses.items():
+        courses_ref.document(name).set(info)
 
-# Carrega cursos ao iniciar
-courses = load_courses()
-
-# Estados para o ConversationHandler de adicionar curso
+# --- Conversa com o Bot ---
 AD_NOME, AD_AREA, AD_LINK = range(3)
-# Estados para editar curso
 ED_NOME, ED_CAMPO, ED_VALOR = range(3, 6)
-# Estado para apagar curso (apenas nome)
 AP_NOME = 6
 
-# Função para iniciar o bot via HTTP (Firebase Function)
-@functions_framework.http
-def telegram_bot(request):
-    app = Application.builder().token("SEU_TOKEN_DO_BOT_AQUI").build()
-
-    # Funções de resposta (como o /start) e outros handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("listar_cursos", list_courses))
-    app.add_handler(CommandHandler("curso", get_course_link))
-
-    # ConversationHandlers para manipular adição, edição e exclusão de cursos
-    app.add_handler(add_conv)
-    app.add_handler(edit_conv)
-    app.add_handler(del_conv)
-
-    # Recebe e processa a requisição do Telegram
-    app.run_polling()  # Não é o ideal, mas vamos rodar isso para o Firebase até o limite.
-
-    return "OK", 200  # Retorna resposta para o Firebase Functions
-
-# --- Funções do Bot (como /start, /listar_cursos, etc) ---
 async def start(update: Update, context: CallbackContext):
     msg = (
         "👋 Olá! Eu sou o bot de cursos. Comandos disponíveis:\n"
@@ -104,6 +88,7 @@ async def add_course_link(update: Update, context: CallbackContext):
     link = update.message.text.strip()
     nome = context.user_data["add_nome"]
     area = context.user_data["add_area"]
+    courses = load_courses()
     courses[nome] = {"area": area, "link": link}
     save_courses(courses)
     await update.message.reply_text(
@@ -114,6 +99,7 @@ async def add_course_link(update: Update, context: CallbackContext):
 
 # --- Listar Cursos ---
 async def list_courses(update: Update, context: CallbackContext):
+    courses = load_courses()
     if not courses:
         await update.message.reply_text("❗ Nenhum curso cadastrado.")
         return
@@ -129,14 +115,35 @@ async def list_courses(update: Update, context: CallbackContext):
     msg += "\nPara consultar o link, use: /curso <nome do curso>"
     await update.message.reply_text(msg)
 
-# --- Consultar Link do Curso ---
-async def get_course_link(update: Update, context: CallbackContext):
-    if not context.args:
-        await update.message.reply_text("❗ Uso: /curso <nome do curso>")
-        return
-    nome = " ".join(context.args).strip()
-    if nome in courses:
-        link = courses[nome]["link"]
-        await update.message.reply_text(f"🔗 Link do curso '{nome}': {link}")
-    else:
-        await update.message.reply_text(f"❗ Curso '{nome}' não encontrado.")
+# Função principal para o bot
+def main():
+    bot_token = "7990357492:AAHLaFLgCg7FBxZh5VoJwqMaIadyS7bp8Tc"  # Substitua pelo token do seu bot
+
+    application = Application.builder().token(bot_token).build()
+
+    # Definindo handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("listar_cursos", list_courses))
+
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("adicionar_curso", add_course_start)],
+        states={
+            AD_NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_nome)],
+            AD_AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_area)],
+            AD_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
+        },
+        fallbacks=[CommandHandler("cancelar", cancel)]
+    ))
+
+    application.run_polling()
+
+# Função Firebase para iniciar o bot no Firebase Functions
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("🚫 Operação cancelada.")
+    return ConversationHandler.END
+
+@https.on_request
+def bot(request):
+    main()
+    return "Bot rodando"
+
