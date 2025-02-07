@@ -21,13 +21,13 @@ COURSES_FILE = "cursos.json"
 
 def load_courses():
     try:
-        with open(COURSES_FILE, "r") as f:
+        with open(COURSES_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
 def save_courses(courses):
-    with open(COURSES_FILE, "w") as f:
+    with open(COURSES_FILE, "w", encoding="utf-8") as f:
         json.dump(courses, f, indent=4)
 
 # Carrega cursos ao iniciar
